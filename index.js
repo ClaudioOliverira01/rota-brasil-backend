@@ -8,6 +8,16 @@ const {
   randomUUID
 } = require("crypto");
 const PDFDocument = require("pdfkit");
+const {
+  normalizeSupabaseUrl,
+  describeSupabaseConfig,
+  describeCause
+} = require("./supabaseDiagnostics");
+const {
+  mergeProgress,
+  rowToProgress,
+  progressToRow
+} = require("./progressMerge");
 
 dotenv.config();
 
@@ -21,40 +31,29 @@ const FRONTEND_URL =
   process.env.FRONTEND_URL ||
   "http://localhost:5173";
 
+const SUPABASE_URL =
+  normalizeSupabaseUrl(
+    process.env.SUPABASE_URL
+  );
+
+const SUPABASE_ANON_KEY =
+  String(
+    process.env.SUPABASE_ANON_KEY || ""
+  ).trim();
+
 const SUPABASE_CONFIGURED =
   Boolean(
-    process.env.SUPABASE_URL &&
-    process.env.SUPABASE_ANON_KEY &&
-    !process.env.SUPABASE_URL.includes(
+    SUPABASE_URL &&
+    SUPABASE_ANON_KEY &&
+    !SUPABASE_URL.includes(
       "SEUPROJETO"
     ) &&
-    !process.env.SUPABASE_ANON_KEY.includes(
+    !SUPABASE_ANON_KEY.includes(
       "sua_chave"
     )
   );
 
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (
-        !origin ||
-        FRONTEND_URL === "*" ||
-        origin === FRONTEND_URL ||
-        /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/.test(
-          origin
-        )
-      ) {
-        return callback(null, true);
-      }
-
-      return callback(
-        new Error(
-          "Origem não autorizada pelo CORS"
-        )
-      );
-    }
-  })
-);/*
+/*
  * CORS
  * FRONTEND_URL aceita várias origens separadas por vírgula:
  *   FRONTEND_URL=https://rota-brasil.vercel.app,https://meu-dominio.com.br
@@ -107,8 +106,8 @@ app.use(
 const supabase =
   SUPABASE_CONFIGURED
     ? createClient(
-        process.env.SUPABASE_URL,
-        process.env.SUPABASE_ANON_KEY
+        SUPABASE_URL,
+        SUPABASE_ANON_KEY
       )
     : null;
 
@@ -167,108 +166,6 @@ function validatePlayerPayload(
   }
 
   return null;
-}
-
-function normalizeProgress(
-  body
-) {
-  return {
-    playerId:
-      String(
-        body?.playerId || ""
-      ),
-
-    nickname:
-      String(
-        body?.nickname || ""
-      ).trim(),
-
-    avatar:
-      String(
-        body?.avatar || "ae"
-      ),
-
-    currentPhase:
-      Math.max(
-        1,
-        Math.min(
-          4,
-          Number(
-            body?.currentPhase || 1
-          )
-        )
-      ),
-
-    score:
-      Math.max(
-        0,
-        Number(
-          body?.score || 0
-        )
-      ),
-
-    stars:
-      Math.max(
-        0,
-        Number(
-          body?.stars || 0
-        )
-      ),
-
-    completedPhases:
-      Array.isArray(
-        body?.completedPhases
-      )
-        ? body.completedPhases
-        : [],
-
-    accessibility: {
-      narration:
-        body?.accessibility
-          ?.narration !== false,
-
-      highContrast:
-        Boolean(
-          body?.accessibility
-            ?.highContrast
-        ),
-
-      reducedMotion:
-        Boolean(
-          body?.accessibility
-            ?.reducedMotion
-        ),
-
-      dyslexiaFont:
-        Boolean(
-          body?.accessibility
-            ?.dyslexiaFont
-        )
-    },
-
-    gameStartedAt:
-      body?.metrics
-        ?.gameStartedAt ||
-      body?.gameStartedAt ||
-      null,
-
-    gameCompletedAt:
-      body?.metrics
-        ?.gameCompletedAt ||
-      body?.gameCompletedAt ||
-      null,
-
-    totalTimeSeconds:
-      Math.max(
-        0,
-        Number(
-          body?.metrics
-            ?.totalTimeSeconds ||
-          body?.totalTimeSeconds ||
-          0
-        )
-      )
-  };
 }
 
 function buildMemoryPlayer(
@@ -345,16 +242,23 @@ app.get(
 app.get(
   "/api/teste-supabase",
   async (req, res) => {
-    if (
-      !SUPABASE_CONFIGURED
-    ) {
+    const diagnostico =
+      describeSupabaseConfig(
+        process.env.SUPABASE_URL,
+        process.env.SUPABASE_ANON_KEY
+      );
+
+    if (!SUPABASE_CONFIGURED) {
       return res
         .status(503)
         .json({
           mensagem:
-            "Supabase ainda não configurado"
+            "Supabase ainda não configurado",
+          diagnostico
         });
     }
+
+    const inicio = Date.now();
 
     try {
       const {
@@ -375,6 +279,9 @@ app.get(
       return res.json({
         mensagem:
           "Supabase conectado com sucesso!",
+        tempoMs:
+          Date.now() - inicio,
+        diagnostico,
         dados: data
       });
     } catch (error) {
@@ -383,8 +290,10 @@ app.get(
         .json({
           mensagem:
             "Erro ao consultar o Supabase",
-          erro:
-            error.message
+          erro: error.message,
+          causa:
+            describeCause(error),
+          diagnostico
         });
     }
   }
@@ -753,14 +662,15 @@ app.post(
     next
   ) => {
     try {
-      const payload =
-        normalizeProgress(
-          req.body
-        );
+      const incoming =
+        req.body || {};
 
-      if (
-        !payload.playerId
-      ) {
+      const playerId =
+        String(
+          incoming.playerId || ""
+        ).trim();
+
+      if (!playerId) {
         return res
           .status(400)
           .json({
@@ -772,11 +682,12 @@ app.post(
       if (
         !SUPABASE_CONFIGURED
       ) {
-        if (
-          !memoryPlayers.has(
-            payload.playerId
-          )
-        ) {
+        const player =
+          memoryPlayers.get(
+            playerId
+          );
+
+        if (!player) {
           return res
             .status(404)
             .json({
@@ -785,38 +696,66 @@ app.post(
             });
         }
 
+        const merged =
+          mergeProgress(
+            memoryProgress.get(
+              playerId
+            ),
+            {
+              ...incoming,
+              playerId
+            }
+          );
+
+        merged.nickname =
+          merged.nickname ||
+          player.nickname;
+
+        merged.avatar =
+          merged.avatar ||
+          player.avatar;
+
         memoryProgress.set(
-          payload.playerId,
-          payload
+          playerId,
+          merged
         );
 
         return res.json(
-          payload
+          merged
         );
       }
 
-      const row = {
-        player_id:
-          payload.playerId,
-        current_phase:
-          payload.currentPhase,
-        score:
-          payload.score,
-        stars:
-          payload.stars,
-        completed_phases:
-          payload.completedPhases,
-        accessibility:
-          payload.accessibility,
-        game_started_at:
-          payload.gameStartedAt,
-        game_completed_at:
-          payload.gameCompletedAt,
-        total_time_seconds:
-          payload.totalTimeSeconds,
-        updated_at:
-          new Date().toISOString()
-      };
+      const {
+        data: currentRow,
+        error: readError
+      } =
+        await supabase
+          .from(
+            "progresso_jogadores"
+          )
+          .select(
+            "player_id,current_phase,score,stars,completed_phases,accessibility,game_started_at,game_completed_at,total_time_seconds"
+          )
+          .eq(
+            "player_id",
+            playerId
+          )
+          .maybeSingle();
+
+      if (readError) {
+        throw readError;
+      }
+
+      const merged =
+        mergeProgress(
+          rowToProgress(
+            currentRow
+          ),
+          {
+            ...incoming,
+            playerId
+          }
+        );
 
       const {
         error
@@ -826,7 +765,9 @@ app.post(
             "progresso_jogadores"
           )
           .upsert(
-            row,
+            progressToRow(
+              merged
+            ),
             {
               onConflict:
                 "player_id"
@@ -838,7 +779,7 @@ app.post(
       }
 
       return res.json(
-        payload
+        merged
       );
     } catch (error) {
       next(error);
@@ -1896,7 +1837,9 @@ app.use(
         error:
           "Erro interno do servidor",
         detail:
-          error.message
+          error.message,
+        causa:
+          describeCause(error)
       });
   }
 );
