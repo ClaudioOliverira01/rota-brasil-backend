@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test test/progressMerge.test.js test/validation.test.js test/api.test.js test/config.test.js",
+    "test:smoke": "node scripts/smoke-test.mjs"
   },
   "keywords": [],
   "author": "",
@@ -21,5 +22,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
+  },
+  "engines": {
+    "node": ">=18.18"
   }
 }
